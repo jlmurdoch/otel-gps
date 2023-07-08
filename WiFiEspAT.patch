@@ -1,0 +1,17 @@
+--- WiFiEspAT/src/utility/EspAtDrv.cpp	2023-07-08 11:53:38.135907623 +0100
++++ WiFiEspAT/src/utility/EspAtDrv.cpp	2023-07-08 12:10:13.915370785 +0100
+@@ -401,6 +401,14 @@
+   }
+   cmd->print('"');
+  }
++
++  // Fast Scan - find first match and connect
++  if (!ssid)
++    cmd->print(F(",,"));
++  else if (!password)
++    cmd->print(",");
++  cmd->print(F(",,,,,0"));
++
+   if (!sendCommand())
+     return false;
+   if (persistent) {
