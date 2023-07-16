@@ -25,6 +25,12 @@ In basic technical terms, the device:
 ## Release Information
 - 2023-07-08 - First Release
   - Just GPS positional data
+- 2023-07-16 - Major Updates
+  - Rework FIFO, metadata handling, raw data collection
+  - Add accelerometer data collection and metrics
+  - Clean up loop(), setup() procedures for both cores
+  - Comments on areas scoped for reworking
+  - Remove bugs seen when buffering / caching
 
 ## Hardware 
 The following hardware is utilised:

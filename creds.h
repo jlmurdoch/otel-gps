@@ -5,3 +5,4 @@
 #define PORT 4318
 #define URI "/v1/metrics"
 #define APIKEY "abcdefghijklmopqrstuvw"
+// #define SSL 1
