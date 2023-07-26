@@ -10,52 +10,53 @@
 // Largest Protobuf size
 #define MAX_PROTOBUF_BYTES 65534
 
-// Transmission Options
-#define DELAY_WAIT 1 // Generic Delay - unused
-
 // Serial console output
 // #define DEBUG 1 // This is noisy, as it will throw characters to show memory, protobuf values, etc
 #define VERBOSE 1 // Less noisy, but not much introspective capability compared to DEBUG
 
 // Get all the credentials out of creds.h
-const char *ssid = WIFI_SSID;
-const char *pass = WIFI_PASS;
-const char *host = HOST;
-const uint16_t port = PORT;
-const char *uri = URI ;
-const char *apikey = APIKEY;
+static const char *ssid = WIFI_SSID;
+static const char *pass = WIFI_PASS;
+static const char *host = HOST;
+static const uint16_t port = PORT;
+static const char *uri = URI ;
+static const char *apikey = APIKEY;
+
+#ifdef ARDUINO_ARCH_ESP32
+HardwareSerial GPSSerial(1);
+QueueHandle_t xLongQueue;
+#endif 
 
 // Otel Protobuf Payload
-uint8_t pbufPayload[MAX_PROTOBUF_BYTES];
-size_t pbufLength = 0;
+static uint8_t pbufPayload[MAX_PROTOBUF_BYTES];
+static size_t pbufLength = 0;
 
 /*
  * Core 0: Interim Metric Metadata Store
  */
-
-// Dimensions of each metric
-struct DimensionMeta {
-  char *attrname;
-  char *attrval;
-};
-
 #define METRIC_MAX_DIMS 3
-// Each metric
-struct MetricMeta {
-  char *name;
-  char *desc;
-  char *unit;
-  char *resname;
-  char *resval;
-  DimensionMeta dimMeta[METRIC_MAX_DIMS];
+
+struct DimensionMeta {
+  const char *attrname;
+  const char *attrval;
 };
 
-// Refactored to make counting easier
-struct MetricMeta metricMeta[] = {
+struct MetricMeta {
+  const char *name;
+  const char *desc;
+  const char *unit;
+  const char *resname;
+  const char *resval;
+  DimensionMeta dimMeta[METRIC_MAX_DIMS];
+} metricMeta[] = {
   // First number indicates the array to put the data - e.g Acceleration all can go into the same store
   // pos, shortname   description     unit   attributes
-  { "position", "GPS Position", "degrees", "service.name", "jm-moto", { {"dim", "lat"}, {"dim", "lon"}, { 0, 0 } } },
-  { "accel", "Acceleration", "g", "service.name", "jm-moto", { {"dim", "x"}, {"dim", "y"}, {"dim", "z"} } }
+  { "position", "GPS Position", "degrees", "service.name", "jm-moto", 
+    { {"dim", "lat"}, {"dim", "lon"}, { 0, 0 } } 
+  },
+  { "accel", "Acceleration", "g", "service.name", "jm-moto", 
+    { {"dim", "x"}, {"dim", "y"}, {"dim", "z"} } 
+  }
 };
 
 /*
@@ -124,7 +125,6 @@ typedef struct dnode {
   Metricptr metricTail;  // For push() for raw collection
 } Datanode;
 
-
 // Helper function to count metric dimensions
 // TODO: Write to a dynamic, global array in setup()? e.g. [2, 3]
 int countMetricDims(int x) {
@@ -144,7 +144,7 @@ int countMetricDims(int x) {
  */
 
 // This can be used to collect multiple registers without delay
-void readI2CConsecutiveBytes(uint8_t device, uint8_t addr, uint8_t *values, int size) {
+void readI2CConsecutiveBytes(uint8_t device, uint8_t addr, uint8_t *values, size_t size) {
   Wire.beginTransmission(device);
   Wire.write(addr);
   Wire.endTransmission(false);
@@ -170,38 +170,71 @@ void initAccelerometer(void) {
   /*
    * I2C Setup for Accelerometer
    */
+#ifdef ARDUINO_ARCH_ESP32
+  // ESP32-S3-Pico pinout
+  Wire.begin(17, 18);
+#else
+  // Works for any RP2040
   Wire.begin();
+#endif
 
+#ifdef MC3419
   // Mode: Standby
-  writeI2CSingleByte(MC3419_ADDR, 0x07, 0x00);
+  writeI2CSingleByte(ACCEL_ADDR, 0x07, 0x00);
   delay(10);
 
   // Disable Interrupts
-  writeI2CSingleByte(MC3419_ADDR, 0x06, 0x00);
+  writeI2CSingleByte(ACCEL_ADDR, 0x06, 0x00);
   delay(10);
 
   // Sample Rate (pg 45) - 25Hz sampling
-  writeI2CSingleByte(MC3419_ADDR, 0x08, 0x10);
+  writeI2CSingleByte(ACCEL_ADDR, 0x08, 0x10);
   delay(10);
 
   // Range & Scale Control (pg 53) - 2g - Bugatti Veyron = 1.55g / F1 turns = 6.5g
-  writeI2CSingleByte(MC3419_ADDR, 0x20, 0x01);
+  writeI2CSingleByte(ACCEL_ADDR, 0x20, 0x01);
   delay(10);
 
   // Mode: Wake
-  writeI2CSingleByte(MC3419_ADDR, 0x07, 0x01);
+  writeI2CSingleByte(ACCEL_ADDR, 0x07, 0x01);
   delay(10);
+#else
+  // MPU9250 Reset
+  writeI2CSingleByte(ACCEL_ADDR, 0x6B, 0x80);
+  delay(10);
+
+  // Bypass Enable (pg 29) 
+  writeI2CSingleByte(ACCEL_ADDR, 0x37, 0x02);
+  delay(10);
+
+  // 2g range
+  writeI2CSingleByte(ACCEL_ADDR, 0x1C, 0x00);
+  delay(10);
+
+  // Low-pass filter - #6
+  writeI2CSingleByte(ACCEL_ADDR, 0x1D, 0x0E);
+  delay(10); 
+#endif
 }
 
 // Collect data from all 6 registers (3 x 16-bits)
 void collectAccelerometer(Rawptr temp) {
   // Read x/y/z @ 16-bits each (6 * 8 bits)
   uint8_t values[6] = {0};
-  readI2CConsecutiveBytes(MC3419_ADDR, 0x0D, values, 6);
+  readI2CConsecutiveBytes(ACCEL_ADDR, ACCEL_REG, values, 6);
 
+#ifdef MC3419
+  // MC3419 is big-endian
   temp->x = (((int16_t) ((uint16_t) values[1] << 8 | values[0])) * (G_RANGE / 32767.5f));
   temp->y = (((int16_t) ((uint16_t) values[3] << 8 | values[2])) * (G_RANGE / 32767.5f));
   temp->z = (((int16_t) ((uint16_t) values[5] << 8 | values[4])) * (G_RANGE / 32767.5f));
+#else
+  // MPU9260 is little-endian and needs offset tuning
+  // TODO: Calibrate offsets
+  temp->x = ((int16_t) ((uint16_t) values[0] << 8 | values[1])) * G_RANGE / 32767.5f * 0.9807f;
+  temp->y = ((int16_t) ((uint16_t) values[2] << 8 | values[3])) * G_RANGE / 32767.5f * 0.9807f;
+  temp->z = ((int16_t) ((uint16_t) values[4] << 8 | values[5])) * G_RANGE / 32767.5f * 0.9807f;
+#endif
 }
 
 // Convert HHMMSS.mmm to epoch secs
@@ -360,16 +393,17 @@ bool rawdataCollect(Rawptr temp) {
   temp->epoch = 0;
 
   // Phase 1: Get at least one valid, usable GPS message
-  while(Serial1.available()) {
+  while(GPSSerial.available()) {
     // Get a full line, replacing the stripped-out \n with \0
-    len = Serial1.readBytesUntil('\n', nmeaMsg, MAX_NMEA_MSG_BYTES);
+    len = GPSSerial.readBytesUntil('\n', nmeaMsg, MAX_NMEA_MSG_BYTES);
     nmeaMsg[len] = '\0';
 
     // Get the NMEA Sentence header
     strncpy(header, nmeaMsg, 6);
 #ifdef VERBOSE
-    Serial.print(F("[VERBOSE] GPS-NMEA: "));
-    Serial.println(nmeaMsg);
+    // Very noisy:
+    // Serial.print(F("[VERBOSE] GPS-NMEA: "));
+    // Serial.println(nmeaMsg);
 #endif
       
     // Default Order: GNGGA,GPGSA,GLGSA,GNRMC,GNVTG
@@ -386,6 +420,7 @@ bool rawdataCollect(Rawptr temp) {
   } else {
     // Add accelerometer data
     collectAccelerometer(temp);
+    //dummyAccelerometer(temp);
     return 1;
   }
 }
@@ -428,15 +463,15 @@ bool datasetInit(Dataarray array) {
   for (int x = 0; x < METRIC_TYPES; x++) {
     if ((*array)[x].name == NULL) {
       // Set up the metric metadata
-      (*array)[x].name = metricMeta[x].name;
-      (*array)[x].desc = metricMeta[x].desc;
-      (*array)[x].unit = metricMeta[x].unit;
+      (*array)[x].name = const_cast<char*>(metricMeta[x].name);
+      (*array)[x].desc = const_cast<char*>(metricMeta[x].desc);
+      (*array)[x].unit = const_cast<char*>(metricMeta[x].unit);
 
       // Resource attributes go here - if they exist
       if (metricMeta[x].resname != NULL) {
         Attrptr tempattr = (Attrptr) malloc(sizeof(Attrnode));
-        tempattr->key = metricMeta[x].resname;
-        tempattr->value = metricMeta[x].resval;
+        tempattr->key = const_cast<char*>(metricMeta[x].resname);
+        tempattr->value = const_cast<char*>(metricMeta[x].resval);
         tempattr->next = NULL;
         (*array)[x].attr = tempattr;
       }
@@ -459,8 +494,8 @@ bool datapointPushTail(Dataarray array, int x, int y, double epoch, double value
   // Add metric attributes
   if (metricMeta[x].dimMeta[y].attrname != NULL) {
     Attrptr tempattr = (Attrptr)malloc(sizeof(Attrnode));
-    tempattr->key = metricMeta[x].dimMeta[y].attrname;
-    tempattr->value = metricMeta[x].dimMeta[y].attrval;
+    tempattr->key = const_cast<char*>(metricMeta[x].dimMeta[y].attrname);
+    tempattr->value = const_cast<char*>(metricMeta[x].dimMeta[y].attrval);
     tempattr->next = NULL;
     temp->attr = tempattr;
   }
@@ -547,10 +582,18 @@ bool fifoDispatch(Rawptr ptr) {
   memcpy(fifobuf, ptr, sizeof(fifobuf));
   
   // This HAS to be non-blocking to begin with, otherwise the GPS buffer will overflow and data corruption will occur
+#ifdef ARDUINO_ARCH_ESP32
+  if (xQueueSend(xLongQueue, &fifobuf[0], NULL)) {
+#else 
   if (rp2040.fifo.push_nb(fifobuf[0])) {
+#endif
     // If the above succeeds, the FIFO is empty or in the process of being emptied by fifoCollect()
-    for (int i = 1; i < FIFO_SIZE; i++)  
+    for (int i = 1; i < FIFO_SIZE; i++)
+#ifdef ARDUINO_ARCH_ESP32
+      xQueueSend(xLongQueue, &fifobuf[i], (TickType_t) 1000);
+#else 
       rp2040.fifo.push(fifobuf[i]);
+#endif
     
     // Remove this element if pushed
     rawPopHead();
@@ -565,10 +608,18 @@ int fifoCollect(Dataarray array) {
   uint32_t fifobuf[FIFO_SIZE] = { 0 };
 
   // Put in a limit here to keep the packet size small and fragment up larger backlogs? MAX_METRICS?
+#if defined(ARDUINO_ARCH_ESP32) 
+  while (uxQueueMessagesWaiting(xLongQueue) >= FIFO_SIZE) {
+#else
   while (rp2040.fifo.available() >= FIFO_SIZE) {
+#endif
     // Collect an entire payload off the FIFO
     for (int i = 0; i < FIFO_SIZE; i++)
+#if defined(ARDUINO_ARCH_ESP32) 
+      xQueueReceive(xLongQueue, &fifobuf[i], (TickType_t) 1000);
+#else
       fifobuf[i] = rp2040.fifo.pop();
+#endif
 
     // Add bytes to overall Core 0 dataset
     datasetPush(array, fifobuf);
@@ -578,6 +629,12 @@ int fifoCollect(Dataarray array) {
 #endif
   }
 
+#ifdef VERBOSE
+  if (datapoints) {
+    Serial.print(F("[VERBOSE] FIFORecv: Datapoints sent = "));
+    Serial.println(datapoints);
+  }
+#endif
   return datapoints;
 }
 
@@ -794,7 +851,7 @@ bool MetricsData_encode_resource_metrics(pb_ostream_t *ostream, const pb_field_i
       if (!pb_encode_tag_for_field(ostream, field)) {
 #ifdef VERBOSE
         const char *error = PB_GET_ERROR(ostream);
-        Serial.print("[VERBOSE] Protobuf: MetricsData Tag - ");
+        Serial.print(F("[VERBOSE] Protobuf: MetricsData Tag - "));
         Serial.println(error);
 #endif
         return false;
@@ -804,7 +861,7 @@ bool MetricsData_encode_resource_metrics(pb_ostream_t *ostream, const pb_field_i
       if (!pb_encode_submessage(ostream, ResourceMetrics_fields, &resource_metrics)) {
 #ifdef VERBOSE
         const char *error = PB_GET_ERROR(ostream);
-        Serial.print("[VERBOSE] Protobuf: MetricsData Msg - ");
+        Serial.print(F("[VERBOSE] Protobuf: MetricsData Msg - "));
         Serial.println(error);
 #endif
         return false;
@@ -836,10 +893,15 @@ bool buildProtobuf (Dataarray args) {
 }
 
 // Function to send data to a HTTP(S)-based endpoint
-int sendOTLP(uint8_t *buf, size_t bufsize) {
-  // We can't use HTTPClient as it might clash with other WiFi libraries
-  WiFiClient client;
-  
+int sendOTLP(uint8_t *buf, size_t bufsize) { 
+  /*
+   * 0 = Good 
+   * 1 = Socket failed
+   * 2 = Bad HTTP response
+   * 3 = Lost HTTP connection after send
+   * 4 = Lost HTTP connection before send
+   */
+
   // Check to see if the WiFi is still alive
   if (WiFi.status() != WL_CONNECTED) {
 #ifdef VERBOSE
@@ -847,18 +909,26 @@ int sendOTLP(uint8_t *buf, size_t bufsize) {
     Serial.println(WiFi.status());
 #endif
     joinWireless();
-    return 1;
   }
 
   // Connect and handle failure
   digitalWrite(LED_BUILTIN, HIGH);
-#ifdef SSL
+
+#if !defined(ARDUINO_CHALLENGER_2040_WIFI_BLE_RP2040) && defined(SSL)
+  WiFiClientSecure client;
+  client.setInsecure();
+#else
+  WiFiClient client;
+#endif
+
+#if defined(ARDUINO_CHALLENGER_2040_WIFI_BLE_RP2040) && defined(SSL)
   if (!client.connectSSL(host, port)) {
 #else
   if (!client.connect(host, port)) {
 #endif
+
 #ifdef VERBOSE
-    Serial.print(F("[VERBOSE] Delivery: Connection failed to "));
+    Serial.print(F("[VERBOSE] Delivery: Socket failed to "));
     Serial.println(String(host));
 #endif
 
@@ -867,7 +937,7 @@ int sendOTLP(uint8_t *buf, size_t bufsize) {
     digitalWrite(LED_BUILTIN, HIGH);
     delay(200);
     digitalWrite(LED_BUILTIN, LOW);
-    return 2;
+    return 1;
   }
 
   // Transmit the readings
@@ -884,29 +954,50 @@ int sendOTLP(uint8_t *buf, size_t bufsize) {
     client.print(String(bufsize));
     client.print(F("\r\n\r\n"));
     client.write(buf, bufsize);
-    delay(100);
-  } else {
+
+#ifdef ARDUINO_ARCH_ESP32
+    client.setTimeout(5);
+#endif
+
+    // Validate if we get a response - if not, abort
+    if (client.connected()) {
+      char resp[16] = {0};
+#ifdef VERBOSE
+      Serial.print(F("[VERBOSE] Delivery: Waiting for response"));
+      Serial.println(resp);
+#endif
+      int len = client.readBytesUntil('\n', resp, 15);
+      resp[len] = '\0';
+      if(strcmp(resp, "HTTP/1.1 200 OK")) {
+#ifdef VERBOSE
+        Serial.print(F("[VERBOSE] Delivery: Bad HTTP response - "));
+        Serial.println(resp);
+#endif
+        client.flush();
+        client.stop();
+        return 2; 
+      }
+    } else {
+#ifdef VERBOSE
+      Serial.println(F("[VERBOSE] Delivery: Lost HTTP connection after send"));
+#endif
+      return 3;
+    }
 
 #ifdef VERBOSE
-    Serial.println(F("[VERBOSE]: Delivery: POST Failed"));
+    Serial.println(F("[VERBOSE] Delivery: POST Success"));
+#endif
+  } else {
+#ifdef VERBOSE
+    Serial.println(F("[VERBOSE] Delivery: Lost HTTP connection before send"));
 #endif
     digitalWrite(LED_BUILTIN, LOW);
     delay(200);
     digitalWrite(LED_BUILTIN, HIGH);
     delay(200);
     digitalWrite(LED_BUILTIN, LOW);
-    return 3;
+    return 4;
   }
-
-// Works, but sometimes emits too much or nothing at all
-#ifdef VERBOSE
-  Serial.print(F("[VERBOSE] Result: "));
-  while (client.available()) {
-    char ch = static_cast<char>(client.read());
-    Serial.print(ch);
-  }
-  Serial.println();
-#endif
 
   // Flush and clear the connection
   client.flush();
@@ -920,18 +1011,23 @@ int sendOTLP(uint8_t *buf, size_t bufsize) {
 void joinWireless() {
   digitalWrite(LED_BUILTIN, HIGH);
 #ifdef VERBOSE
-  Serial.println(F("[VERBOSE] Hardware: ESP8266 Awaiting AP"));
+  Serial.println(F("[VERBOSE] Hardware: Awaiting AP"));
 #endif
   // If it's not connected we receive, keep trying
+#if defined(ARDUINO_CHALLENGER_2040_WIFI_BLE_RP2040)
   while (WiFi.begin(ssid, pass) != WL_CONNECTED) {
-    // Cleanly disconnect
-    WiFi.disconnect();  
+    WiFi.disconnect();
+#else
+  WiFi.begin(ssid, pass);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(5000);
+#endif  
 #ifdef VERBOSE
-    Serial.println(F("[VERBOSE] Hardware: ESP8266 Awaiting AP"));
+    Serial.println(F("[VERBOSE] Hardware: Awaiting AP"));
 #endif
   }
 #ifdef VERBOSE
-  Serial.println(F("[VERBOSE] Hardware: ESP8266 Joined AP"));
+  Serial.println(F("[VERBOSE] Hardware: Joined AP"));
 #endif
 
   digitalWrite(LED_BUILTIN, LOW);
@@ -939,11 +1035,10 @@ void joinWireless() {
 
 // Used to (re)initialise the WiFi hardware
 void initWireless() {
-#ifdef VERBOSE
-  Serial.println(F("[VERBOSE] Hardware: ESP8266 Initialise"));
-#endif
-
 #if defined(ARDUINO_CHALLENGER_2040_WIFI_BLE_RP2040)
+#ifdef VERBOSE
+  Serial.println(F("[VERBOSE] Hardware: ESP8266 Reset"));
+#endif
   // Special Startup for the ESP8266
   pinMode(PIN_ESP_RST, OUTPUT);
   digitalWrite(PIN_ESP_RST, HIGH);
@@ -955,27 +1050,20 @@ void initWireless() {
   delay(1);
   digitalWrite(PIN_ESP_RST, HIGH); // End Reset
   
-  // Default speed - 15kb/sec across wifi
-  Serial2.begin(115200);
-  while(!Serial2.find("ready")) { delay(10); }
+#ifdef VERBOSE
+  Serial.println(F("[VERBOSE] Hardware: ESP8266 Serial Setup"));
+#endif
+  ESP8266Serial.begin(115200);
+  while(!ESP8266Serial.find("ready")) { delay(10); }
 
-  Serial2.println(F("AT"));
-  while(!Serial2.find("OK\r\n")) { delay(10); }
-
-  /*
-  // 8x Faster speed - 155kb/sec across wifi
-  Serial2.println(F("AT+UART_CUR=115200,8,1,0,0"));
-  delay(100);
-
-  Serial2.begin(115200);
-  while(!Serial2.find("ready")) { delay(10); }
-
-  Serial2.println(F("AT"));
-  while(!Serial2.find("OK\r\n")) { delay(10); }
-  */
-
+  ESP8266Serial.println(F("AT"));
+  while(!ESP8266Serial.find("OK\r\n")) { delay(10); }
+#ifdef VERBOSE
+  Serial.println(F("[VERBOSE] Hardware: ESP8266 Serial Active"));
+#endif
+  
   // WiFiEspAT Begin
-  WiFi.init(Serial2);
+  WiFi.init(ESP8266Serial);
 
   /*
   If we didn't use WiFiEspAt, here what a manual start could look like:
@@ -996,14 +1084,14 @@ void initWireless() {
 #endif
     }
   }
+
   // From WiFiEspAT's SetupPersistentConnection.ino
   // Quit an AP, wipe DNS and enable DHCP
   WiFi.endAP(); 
   WiFi.disconnect();
-#endif
-
 #ifdef VERBOSE
   Serial.println(F("[VERBOSE] Hardware: ESP8266 Ready"));
+#endif
 #endif
 }
 
@@ -1011,16 +1099,18 @@ void setup1() {
   /*
    * GPS - this is only specific to RP2040
    */
-  delay(2000);
-  Serial1.setFIFOSize(MAX_NMEA_BUFFER_BYTES);
-  Serial1.begin(9600);
+#ifdef ARDUINO_ARCH_ESP32
+  GPSSerial.setRxFIFOFull(MAX_NMEA_BUFFER_BYTES);
+  GPSSerial.begin(9600, SERIAL_8N1, 12, 11);
+#else
+  GPSSerial.setFIFOSize(MAX_NMEA_BUFFER_BYTES);
+  GPSSerial.begin(9600);
+#endif
   delay(10);
 
   /*
     Cold Reset:
     $PMTK103*30<CR><LF>
-
-    len = Serial1.readBytesUntil('\n', nmeaMsg, MAX_NMEA_MSG);
     
     Reset output:
     $PMTK011,MTKGPS*08<CR><LF>
@@ -1028,15 +1118,25 @@ void setup1() {
   */
 
   // Both RMC + GGA
-  Serial1.println(F(GPS_OUTPUT_FORMAT));
+  GPSSerial.println(F(GPS_OUTPUT_FORMAT));
   delay(10);
-  // Check for ACK : $PMTK001,314,3*36
 
+  // TODO: Check for ACK: $PMTK001,314,3*36
 
   /*
    * Other Data Sources in Core 1
    */ 
   initAccelerometer();
+}
+
+// Wrapper for ESP32 to run as a task
+void taskLoop1(void *) {
+#if defined(ARDUINO_ARCH_ESP32) && defined(BOARD_HAS_PSRAM)
+   // Use external PSRAM
+  psramInit();
+#endif
+  while (true)
+    loop1();
 }
 
 void loop1() {
@@ -1046,12 +1146,19 @@ void loop1() {
 
   /*
    * Phase 1: Pickup from GPS
-   * - GPS data determines if we do anything, hence wait for Serial1
+   * - GPS data determines if we do anything, hence wait for GPSSerial
    * - Create a raw data point in memory
    * - Collect GPS and other data points
    */
-  if (Serial1.available()) {
+
+  if (GPSSerial.available()) {
+#if defined(ARDUINO_ARCH_ESP32) && defined(BOARD_HAS_PSRAM)
+    // PSRAM
+    Rawptr temp = (Rawptr) ps_malloc(sizeof(Rawnode));
+#else
+    // Normal RAM
     Rawptr temp = (Rawptr) malloc(sizeof(Rawnode));
+#endif
 
     if (rawdataCollect(temp)) {
       rawPushTail(temp);
@@ -1083,6 +1190,18 @@ void setup() {
   // Wireless start
   initWireless();
   joinWireless();
+
+#ifdef ARDUINO_ARCH_ESP32
+  xLongQueue = xQueueCreate(FIFO_SIZE, sizeof(uint32_t));
+  // Run the second core setup1() once
+  setup1();
+  // Run the second core loop1() as a P0 task on core 0 (the *SECOND* ESP32 core) - need to assign PSRAM memory
+  xTaskCreatePinnedToCore(taskLoop1, "Loop 1 on Core 0", 65536, NULL, 0, NULL, 0);
+#endif
+
+#ifdef VERBOSE
+  Serial.println(F("[VERBOSE] Start-up: Complete"));
+#endif
 }
 
 void loop() {
@@ -1110,7 +1229,12 @@ void loop() {
    
   // Phase 2: If we have data now, send it
   if (pbufLength > 0) {
-    if(sendOTLP(pbufPayload, pbufLength) == 0)
+    if(sendOTLP(pbufPayload, pbufLength) == 0) {
+#ifdef VERBOSE
+      Serial.print(F("[VERBOSE] Delivery: Payload size = "));
+      Serial.println(pbufLength);
+#endif
       pbufLength = 0;
+    }
   }
 }

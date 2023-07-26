@@ -4,15 +4,15 @@
 
 This is an attempt at an OpenTelemetry-compatible GPS device that collects positional / kinetic metrics and sends them to an OpenTelemetry Protocol endpoint, with the potential to add more metrics (altitude, acceleration, etc).
 
-From a developer-perspective, this has built from a hobby-perspective to learn more about OpenTelemetry and it's inner-workings in their spare time and is not representative of production implementation, official guidance, etc.
+From a developer-perspective, this has built as a hobby / experiment to learn more about OpenTelemetry and its inner-workings and is not representative of production implementation, official guidance, etc.
 
-In basic technical terms, the device:
- - On core 1:
+In basic technical terms, the device performs as follows (in this case a RP2040):
+ - On loop1():
    - Reads data from a GPS unit / other devices
    - Stores the data in core 1 memory
    - Loads the data onto a RP2040 FIFO
    - Clears the data from memory when data is popped off the FIFO
- - On core 0:
+ - On loop():
    - Sets up serial console, wireless
    - Pops the data from the RP2040 FIFO
    - Stores the data in core 0 memory
@@ -27,22 +27,52 @@ In basic technical terms, the device:
   - Just GPS positional data
 - 2023-07-16 - Major Updates
   - Rework FIFO, metadata handling, raw data collection
-  - Add accelerometer data collection and metrics
+  - Add accelerometer (MC3419) data collection and metrics
   - Clean up loop(), setup() procedures for both cores
   - Comments on areas scoped for reworking
   - Remove bugs seen when buffering / caching
+- 2023-07-24 - Improvements & Alternative Hardware
+  - Add support for ESP32 architecture
+  - Support ESP32-S3 PSRAM for collection storage
+  - Add non-ESP8266 WiFi support (ESP32, Infineon)
+  - Add MPU9250 accelerometer support 
+  - GPS & ESP8266 serial definitions for clarity
+  - Remove warnings for static metadata structure
+  - HTTP "200 OK" check to ensure data was delivered
+
+## Known issues / Pending Improvements
+- LED not working as intended
+- Memory limits / consequences untested
+- MPU9250 accelerometer uncorrected
+- Metric dimensions statically set to 3
+- ESP32 GPS task-allocated memory untuned
+- GPS Serial testing
+- Payload verification
+- ESP32-S3 Wifi optimisation (e.g. hidden AP)
 
 ## Hardware 
-The following hardware is utilised:
+The following hardware can be utilised, although for memory, an ESP32-S3 is ideal for buffering, offering more than 1MB RAM in most cases:
+
+### Adafruit Feather form factor
  - [iLabs Challenger RP2040 WiFi/BLE with 16-bit Accelerometer](https://ilabs.se/product/challenger-rp2040-wifi-ble-mkii-with-chip-antenna-and-16bit-accelerometer/)
-   - Using upgraded ESP32-C3 firmware (v2+) for SSL support
- - [Adafruit Ultimate GPS Featherwing](https://learn.adafruit.com/adafruit-ultimate-gps-featherwing/overview)
+   - Using upgraded ESP32-C3 firmware (v2+) for SSL support on the ESP8266
+ - With a [Adafruit Ultimate GPS Featherwing](https://learn.adafruit.com/adafruit-ultimate-gps-featherwing/overview)
+
+### Raspberry Pi Pico form factor
+ - [Raspberry Pi Pico W](https://www.raspberrypi.com/documentation/microcontrollers/raspberry-pi-pico.html)
+*OR*
+ - [Waveshare ESP32-S3 Pico](https://www.waveshare.com/wiki/ESP32-S3-Pico)
+   - With 2MB PSRAM
+ - With a [Waveshare Pico GPS L76B](https://www.waveshare.com/wiki/Pico-GPS-L76B)
+ - With a [Waveshare Pico 10DoF IMU](https://www.waveshare.com/wiki/Pico-10DOF-IMU)
+   - Accelerometer, gyroscope, magnetometer, pressure and temperature sensors
 
 ## Software
-
-During execution, the following software libraries are used:
+During execution, the following software libraries are possibly used:
+ - [arduino-esp32](https://docs.espressif.com/projects/arduino-esp32/en/latest/)
+   - ESP32 architecture support for ESP32, ESP32-S2, ESP32-C3 and ESP32-S3 SoCs
  - [arduino-pico](https://arduino-pico.readthedocs.io/en/latest/index.html)
-   - Used for Pico SDK, RP2040 support, dual-cores, etc
+   - RP2040 architecture support for numerous microcontrollers, such as the Raspberry Pi Pico
  - [Nanopb](https://jpa.kapsi.fi/nanopb/)
    - Applied to metrics, common and resources OpenTelemetry proto
    - Gives the ability to make small, compact, dynamic payloads
@@ -52,8 +82,7 @@ During execution, the following software libraries are used:
    - Modified by me to fast-scan when joining
 
 ## Challenger RP2040 ESP-C3 firmware updates
-
-This is done to get native SSL support with a Challenger RP2040 Wifi (so SSL doesn't need to be implemented within the code).
+This is performed to obtain native SSL support with a Challenger RP2040 Wifi (so SSL doesn't need to be implemented within the code).
 
 *CAUTION*: No responsibility or liability is assumed if these steps end up bricking your hardware:
 
@@ -131,8 +160,8 @@ Otherwise the LEDs work as follows:
 - [The C Programming Language](https://en.wikipedia.org/wiki/The_C_Programming_Language)
   - Linked lists and memory basics
 - [NMEA-0183 Serial Communications](https://en.wikipedia.org/wiki/NMEA_0183)
-  - For how some GPS units may communicate
+  - Common GPS communication format
 - [Adafruit GPS library](https://github.com/adafruit/Adafruit_GPS)
-  - Not used, but a good reference
+  - Not used in the project, but a good reference
 - [Espressif WiFi AT Commands](https://docs.espressif.com/projects/esp-at/en/latest/esp32/AT_Command_Set/Wi-Fi_AT_Commands.html)
   - For testing wireless communications by hand
