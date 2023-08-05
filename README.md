@@ -4,17 +4,19 @@
 
 This is an attempt at an OpenTelemetry-compatible GPS device that collects positional / kinetic metrics and sends them to an OpenTelemetry Protocol endpoint, with the potential to add more metrics (altitude, acceleration, etc).
 
-From a developer-perspective, this has built as a hobby / experiment to learn more about OpenTelemetry and its inner-workings and is not representative of production implementation, official guidance, etc.
+:information_source: From a developer-perspective, this is a hobby / experiment to learn more about OpenTelemetry and its inner-workings and is not representative of production implementation, official guidance, etc.
 
-In basic technical terms, the device performs as follows (in this case a RP2040):
+## How it works
+
+In basic technical terms, the device performs as follows:
  - On loop1():
    - Reads data from a GPS unit / other devices
    - Stores the data in core 1 memory
-   - Loads the data onto a RP2040 FIFO
+   - Loads the data onto a FIFO
    - Clears the data from memory when data is popped off the FIFO
  - On loop():
    - Sets up serial console, wireless
-   - Pops the data from the RP2040 FIFO
+   - Pops the data from the FIFO
    - Stores the data in core 0 memory
    - Writes metadata to an OpenTelemetry metrics protobuf
    - Appends the collected data into an OpenTelemetry metrics protobuf
@@ -39,47 +41,59 @@ In basic technical terms, the device performs as follows (in this case a RP2040)
   - GPS & ESP8266 serial definitions for clarity
   - Remove warnings for static metadata structure
   - HTTP "200 OK" check to ensure data was delivered
+- 2023-08-05 - Usability Enhancements
+  - Remove simple LED support - impossible to convey state
+  - Implement SPI-driven RGB LED support to indicate status levels
+  - Added [ESP32 Bluetooth WiFi Provisioning](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/provisioning/wifi_provisioning.html) on startup to set SSID/passphrase
 
 ## Known issues / Pending Improvements
-- LED not working as intended
+- One contiguous source file - will broken up in the future
 - Memory limits / consequences untested
 - MPU9250 accelerometer uncorrected
 - Metric dimensions statically set to 3
-- ESP32 GPS task-allocated memory untuned
-- GPS Serial testing
-- Payload verification
+- ESP32 GPS core/task memory untuned
+- GPS Serial testing / verification
+- Protobuf payload verification
 - ESP32-S3 Wifi optimisation (e.g. hidden AP)
 
 ## Hardware 
-The following hardware can be utilised, although for memory, an ESP32-S3 is ideal for buffering, offering more than 1MB RAM in most cases:
-
-### Adafruit Feather form factor
- - [iLabs Challenger RP2040 WiFi/BLE with 16-bit Accelerometer](https://ilabs.se/product/challenger-rp2040-wifi-ble-mkii-with-chip-antenna-and-16bit-accelerometer/)
-   - Using upgraded ESP32-C3 firmware (v2+) for SSL support on the ESP8266
- - With a [Adafruit Ultimate GPS Featherwing](https://learn.adafruit.com/adafruit-ultimate-gps-featherwing/overview)
+The following hardware can be utilised, however through development and testing, an ESP32-S3 is recommended as it has superior caching potential for unstable connections, more storage for functionality and lots of wireless features.
 
 ### Raspberry Pi Pico form factor
- - [Raspberry Pi Pico W](https://www.raspberrypi.com/documentation/microcontrollers/raspberry-pi-pico.html)
-*OR*
- - [Waveshare ESP32-S3 Pico](https://www.waveshare.com/wiki/ESP32-S3-Pico)
-   - With 2MB PSRAM
+ - *Recommended:* [Waveshare ESP32-S3 Pico](https://www.waveshare.com/wiki/ESP32-S3-Pico)
+   - Memory: 512kB SRAM + 2MB PSRAM
+   - Storage: 16MB
+   - Bluetooth WiFi Provisioning
+ - *Alternative:* [Raspberry Pi Pico W](https://www.raspberrypi.com/documentation/microcontrollers/raspberry-pi-pico.html)
+   - Memory: 264kB SRAM :warning: *Memory caching risky: needs a stable WiFi connection*
+   - Storage: 2MB
  - With a [Waveshare Pico GPS L76B](https://www.waveshare.com/wiki/Pico-GPS-L76B)
+   - :information_source: Uses an external antenna
  - With a [Waveshare Pico 10DoF IMU](https://www.waveshare.com/wiki/Pico-10DOF-IMU)
    - Accelerometer, gyroscope, magnetometer, pressure and temperature sensors
+
+### Adafruit Feather form factor
+ - *Extremely compact:* [iLabs Challenger RP2040 WiFi/BLE with 16-bit Accelerometer](https://ilabs.se/product/challenger-rp2040-wifi-ble-mkii-with-chip-antenna-and-16bit-accelerometer/)
+   - Memory: 408kB SRAM :warning: *Memory caching limited: needs a moderately reliable connection*
+   - Storage: 4MB
+   - :information_source: Using upgraded ESP32-C3 firmware (v2+) for SSL support on the ESP8266
+ - With a [Adafruit Ultimate GPS Featherwing](https://learn.adafruit.com/adafruit-ultimate-gps-featherwing/overview)
+   - Good for testing, as it has a surface-mounted ceramic antenna
+   - :information_source: Mount **above** the iLabs Challenger using short headers for small form-factor
 
 ## Software
 During execution, the following software libraries are possibly used:
  - [arduino-esp32](https://docs.espressif.com/projects/arduino-esp32/en/latest/)
-   - ESP32 architecture support for ESP32, ESP32-S2, ESP32-C3 and ESP32-S3 SoCs
+   - For microcontrollers based on the EspressIf ESP32-S3 SoC
  - [arduino-pico](https://arduino-pico.readthedocs.io/en/latest/index.html)
-   - RP2040 architecture support for numerous microcontrollers, such as the Raspberry Pi Pico
+   - For microcontrollers based on the Raspberry Pi RP2040
  - [Nanopb](https://jpa.kapsi.fi/nanopb/)
    - Applied to metrics, common and resources OpenTelemetry proto
    - Gives the ability to make small, compact, dynamic payloads
  - [WiFiEspAT](https://github.com/JAndrassy/WiFiEspAT)
-   - For ESP32/ESP8266 wireless
+   - For ESP8266 wireless
    - AT firmware version 2.4.0+ support (needed for SSL)
-   - Modified by me to fast-scan when joining
+   - Needs to be patched to fast-scan when joining
 
 ## Challenger RP2040 ESP-C3 firmware updates
 This is performed to obtain native SSL support with a Challenger RP2040 Wifi (so SSL doesn't need to be implemented within the code).
@@ -136,7 +150,7 @@ Providing the above is understood and executable by the user, the code can be bu
 - Compile the supporting protobuf headers using Nanopb and OpenTelemetry proto files
   - Not supplied in repo as they should be built from latest / for your compiler
 - Clone WiFiEspAt and modify accordingly:
-  - Enable v2 (for SSL) [https://github.com/JAndrassy/WiFiEspAT#getting-started]
+  - (Enable v2 for SSL)[https://github.com/JAndrassy/WiFiEspAT#getting-started]
   - (Optional) Patch it for fast-scanning [WiFiEspAT.patch](/WiFiEspAT.patch)
 
 From there, the codebase can be compiled in a favorite Arduino compatible IDE or at the command-line.
@@ -147,14 +161,16 @@ There are VERBOSE and DEBUG options that can be switched on:
 - VERBOSE will write human-readable messages
 - DEBUG will noisily print characters to represent data flow inside
 
-Otherwise the LEDs work as follows:
-- Red GPS "Lock" LED
-  - 1 second on/off blinking - attempting to attain lock
-  - 1 second on, with longer off periods - lock obtained
-- Green onboard LED
-  - On at start until networking is operational
-  - Blinks once to indicate a successful transfer
-  - Blinks twice to indicate a failed transfer
+Otherwise an RGB LED works as follows (change the GPIO accordingly):
+- Wireless:
+  - White: Initialisation / WiFi Provision (hit "bootsel")
+  - Cyan: WiFi waiting
+  - Blue: Setup complete, WiFi connected
+- Transmission:
+  - Green: Message sent, good response
+  - Yellow: Message sent, bad response
+  - Magenta: Message sent, no response
+  - Red: Nothing sent, connection failure 
 
 ## Further references
 - [The C Programming Language](https://en.wikipedia.org/wiki/The_C_Programming_Language)
@@ -165,3 +181,7 @@ Otherwise the LEDs work as follows:
   - Not used in the project, but a good reference
 - [Espressif WiFi AT Commands](https://docs.espressif.com/projects/esp-at/en/latest/esp32/AT_Command_Set/Wi-Fi_AT_Commands.html)
   - For testing wireless communications by hand
+- [Worldsemi WS2812B RGB LED datasheet](https://cdn-shop.adafruit.com/datasheets/WS2812B.pdf)
+- IMU Datasheets:
+  - [TDK InvenSense MPU9250](https://invensense.tdk.com/wp-content/uploads/2015/02/PS-MPU-9250A-01-v1.1.pdf)
+  - [Memsic MC3419](https://www.memsic.com/Public/Uploads/uploadfile/files/20220119/MC3419-PDatasheet%28APS-048-0073v1.3%29.pdf)

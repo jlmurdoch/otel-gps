@@ -1,18 +1,33 @@
 /*
  * OpenTelemetry-compatible GPS
  * Author: jmurdoch
+ * For full ESP32 support:
+ * - Flash Size: 16MB
+ * - Partition Scheme: 8M with spiffs
+ * - PSRAM: QSPI PSRAM
  */
-#include "otel-gps.h"
 
 /*
  * Tweakable definitions
  */
-// Largest Protobuf size
-#define MAX_PROTOBUF_BYTES 65534
-
 // Serial console output
 // #define DEBUG 1 // This is noisy, as it will throw characters to show memory, protobuf values, etc
-#define VERBOSE 1 // Less noisy, but not much introspective capability compared to DEBUG
+// #define VERBOSE 1 // Less noisy, but not much introspective capability compared to DEBUG
+
+// Use an RGB LED for output
+#define RGB_LED 1
+
+#include "otel-gps.h"
+
+#ifdef ARDUINO_ARCH_ESP32
+HardwareSerial GPSSerial(1);
+QueueHandle_t xLongQueue;
+#endif 
+
+#ifdef RGB_LED
+SPIClass *spi = NULL;
+static const int spiClock = 2400000; // ~0.417us
+#endif
 
 // Get all the credentials out of creds.h
 static const char *ssid = WIFI_SSID;
@@ -21,11 +36,6 @@ static const char *host = HOST;
 static const uint16_t port = PORT;
 static const char *uri = URI ;
 static const char *apikey = APIKEY;
-
-#ifdef ARDUINO_ARCH_ESP32
-HardwareSerial GPSSerial(1);
-QueueHandle_t xLongQueue;
-#endif 
 
 // Otel Protobuf Payload
 static uint8_t pbufPayload[MAX_PROTOBUF_BYTES];
@@ -138,6 +148,42 @@ int countMetricDims(int x) {
 
   return y;
 }
+
+/*
+ * RGB LED - Hardware specific for now
+ */
+#ifdef RGB_LED
+uint32_t makeSPIColorBin(uint8_t inval) {
+  // 0b100100100100100100100100 - 8 x 0b100 (zero)
+  uint32_t outval = 9586980; 
+
+  // Go through each bit in inval
+  for (int x = 0; x < 8; x++) {
+    // Quaternary operation - set to 0b110 if true
+    int y = (inval & (0x1 << x));
+    outval += y * y * y * 2;
+  }
+
+  // Should have a byte in quaternary form
+  return outval;
+}
+
+void sendSPIColor(SPIClass *spi, uint32_t data) {
+  // Send 24 bits - one color, MSB->LSB
+  spi->transfer((data >> 16) & 0xFF);
+  spi->transfer((data >> 8) & 0xFF);
+  spi->transfer(data & 0xFF);
+}
+
+void setRGBLED(uint8_t red, uint8_t green, uint8_t blue) {
+  // Open the SPI and send 24 bits / 72 bits raw data
+  spi->beginTransaction(SPISettings(spiClock, MSBFIRST, SPI_MODE0));
+  sendSPIColor(spi, makeSPIColorBin(red)); // 0x10
+  sendSPIColor(spi, makeSPIColorBin(green)); // 0x10
+  sendSPIColor(spi, makeSPIColorBin(blue)); // 0x10
+  spi->endTransaction();
+}
+#endif
 
 /*
  * CORE 1 - Accelerometer, NMEA Processing and FIFO hand-off
@@ -912,8 +958,6 @@ int sendOTLP(uint8_t *buf, size_t bufsize) {
   }
 
   // Connect and handle failure
-  digitalWrite(LED_BUILTIN, HIGH);
-
 #if !defined(ARDUINO_CHALLENGER_2040_WIFI_BLE_RP2040) && defined(SSL)
   WiFiClientSecure client;
   client.setInsecure();
@@ -931,12 +975,9 @@ int sendOTLP(uint8_t *buf, size_t bufsize) {
     Serial.print(F("[VERBOSE] Delivery: Socket failed to "));
     Serial.println(String(host));
 #endif
-
-    digitalWrite(LED_BUILTIN, LOW);
-    delay(200);
-    digitalWrite(LED_BUILTIN, HIGH);
-    delay(200);
-    digitalWrite(LED_BUILTIN, LOW);
+#ifdef RGB_LED
+    setRGBLED(RGB_RED);
+#endif
     return 1;
   }
 
@@ -975,11 +1016,17 @@ int sendOTLP(uint8_t *buf, size_t bufsize) {
 #endif
         client.flush();
         client.stop();
+#ifdef RGB_LED
+        setRGBLED(RGB_YELLOW);
+#endif
         return 2; 
       }
     } else {
 #ifdef VERBOSE
       Serial.println(F("[VERBOSE] Delivery: Lost HTTP connection after send"));
+#endif
+#ifdef RGB_LED
+        setRGBLED(RGB_MAGENTA);
 #endif
       return 3;
     }
@@ -991,51 +1038,119 @@ int sendOTLP(uint8_t *buf, size_t bufsize) {
 #ifdef VERBOSE
     Serial.println(F("[VERBOSE] Delivery: Lost HTTP connection before send"));
 #endif
-    digitalWrite(LED_BUILTIN, LOW);
-    delay(200);
-    digitalWrite(LED_BUILTIN, HIGH);
-    delay(200);
-    digitalWrite(LED_BUILTIN, LOW);
+#ifdef RGB_LED
+    setRGBLED(RGB_RED);
+#endif
     return 4;
   }
 
   // Flush and clear the connection
   client.flush();
   client.stop();
-  digitalWrite(LED_BUILTIN, LOW);
 
   return 0;
 }
 
 // Used to connect to an access point
 void joinWireless() {
-  digitalWrite(LED_BUILTIN, HIGH);
 #ifdef VERBOSE
   Serial.println(F("[VERBOSE] Hardware: Awaiting AP"));
 #endif
   // If it's not connected we receive, keep trying
 #if defined(ARDUINO_CHALLENGER_2040_WIFI_BLE_RP2040)
   while (WiFi.begin(ssid, pass) != WL_CONNECTED) {
+    // ESP8266 begin() is blocking, so we can disconnect as it's failed and non-persistent
     WiFi.disconnect();
 #else
+#if defined(ARDUINO_ARCH_ESP32)
+  // Use cached creds from WiFi Provisioning
+  WiFi.begin();
+#else
+  // Manually state
   WiFi.begin(ssid, pass);
+#endif
   while (WiFi.status() != WL_CONNECTED) {
     delay(5000);
-#endif  
+#endif
+
 #ifdef VERBOSE
-    Serial.println(F("[VERBOSE] Hardware: Awaiting AP"));
+    Serial.print(F("[VERBOSE] Hardware: Awaiting AP: "));
+    Serial.println(WiFi.status());
 #endif
   }
 #ifdef VERBOSE
   Serial.println(F("[VERBOSE] Hardware: Joined AP"));
 #endif
-
-  digitalWrite(LED_BUILTIN, LOW);
 }
 
+#ifdef ARDUINO_ARCH_ESP32
+/*
+ * Use WiFi Provisioning
+ */
+static void get_device_service_name(char *service_name, size_t max)
+{
+    uint8_t eth_mac[6];
+    const char *ssid_prefix = "PROV_";
+    esp_wifi_get_mac(WIFI_IF_STA, eth_mac);
+    snprintf(service_name, max, "%s%02X%02X%02X",
+             ssid_prefix, eth_mac[3], eth_mac[4], eth_mac[5]);
+}
+
+void initESP32Wireless() {
+  bool provisioned = false;
+  bool bootSelPress = false;
+  unsigned long start = millis();
+
+  // Wait for someone to hit bootsel to pair to a device and get a new SSID/ PSK
+  while(millis() - start < 10000) {
+    if (digitalRead(0) == LOW) {
+      bootSelPress = true;
+      Serial.println(F("[VERBOSE] WiFiProv: Boot Select pressed"));
+      break;
+    }
+  }
+
+  WiFi.mode(WIFI_MODE_STA);
+  
+  wifi_prov_mgr_config_t config = {
+    .scheme = wifi_prov_scheme_ble,
+    // .scheme_event_handler = WIFI_PROV_SCHEME_BLE_EVENT_HANDLER_FREE_BTDM
+    .scheme_event_handler = WIFI_PROV_EVENT_HANDLER_NONE
+  };
+  wifi_prov_mgr_init(config);
+  wifi_prov_mgr_is_provisioned(&provisioned);
+
+  // This checks to see if an SSID was already set or we need a new one
+  if (!provisioned || bootSelPress) {
+    Serial.println(F("[VERBOSE] WiFiProv: WiFi not provisioned yet"));
+
+    char service_name[12];
+    get_device_service_name(service_name, sizeof(service_name));
+
+    uint8_t custom_service_uuid[] = {
+      0xb4, 0xdf, 0x5a, 0x1c, 0x3f, 0x6b, 0xf4, 0xbf, 0xea, 0x4a, 0x82, 0x03, 0x04, 0x90, 0x1a, 0x02,
+    };
+    wifi_prov_scheme_ble_set_service_uuid(custom_service_uuid);
+
+    Serial.println(F("[VERBOSE] WiFiProv: Start provisioning"));
+    wifi_prov_mgr_start_provisioning(WIFI_PROV_SECURITY_1, "abcd1234", service_name, NULL);
+    Serial.println(F("[VERBOSE] WiFiProv: Pending provisioning"));
+    wifi_prov_mgr_wait();
+  }
+
+  wifi_config_t wifi_cfg;
+  esp_wifi_get_config(WIFI_IF_STA, &wifi_cfg);
+  Serial.print(F("[VERBOSE] WiFiProv: Config SSID="));
+  Serial.println((const char *)wifi_cfg.sta.ssid);
+
+  esp_wifi_start();
+  wifi_prov_mgr_deinit();
+}
+#endif
+
 // Used to (re)initialise the WiFi hardware
-void initWireless() {
 #if defined(ARDUINO_CHALLENGER_2040_WIFI_BLE_RP2040)
+void initESP8266Wireless() {
 #ifdef VERBOSE
   Serial.println(F("[VERBOSE] Hardware: ESP8266 Reset"));
 #endif
@@ -1092,8 +1207,8 @@ void initWireless() {
 #ifdef VERBOSE
   Serial.println(F("[VERBOSE] Hardware: ESP8266 Ready"));
 #endif
-#endif
 }
+#endif
 
 void setup1() {
   /*
@@ -1181,14 +1296,28 @@ void loop1() {
 }
 
 void setup() {
-  // Put on the LED until we are in the main loop
-  pinMode(LED_BUILTIN, OUTPUT);
-
   // Switch the Serial console on
   Serial.begin(115200);
 
+#ifdef RGB_LED
+  // Set up the ESP32 SPI
+  spi = new SPIClass(FSPI);
+  spi->begin(SPI_SCK, SPI_MISO, SPI_MOSI, SPI_SS);
+  pinMode(SPI_SS, OUTPUT);
+  setRGBLED(RGB_WHITE);
+#endif
+
   // Wireless start
-  initWireless();
+#if defined(ARDUINO_CHALLENGER_2040_WIFI_BLE_RP2040)
+  initESP8266Wireless();
+#elif defined(ARDUINO_ARCH_ESP32)
+  initESP32Wireless();
+#else
+  // Any Pico W / Infineon Init
+#endif
+#ifdef RGB_LED
+  setRGBLED(RGB_CYAN);
+#endif
   joinWireless();
 
 #ifdef ARDUINO_ARCH_ESP32
@@ -1201,6 +1330,10 @@ void setup() {
 
 #ifdef VERBOSE
   Serial.println(F("[VERBOSE] Start-up: Complete"));
+#endif
+#ifdef RGB_LED
+  // Blue = nothing happening
+  setRGBLED(RGB_BLUE);
 #endif
 }
 
@@ -1235,6 +1368,9 @@ void loop() {
       Serial.println(pbufLength);
 #endif
       pbufLength = 0;
+#ifdef RGB_LED
+      setRGBLED(RGB_GREEN);
+#endif
     }
   }
 }
