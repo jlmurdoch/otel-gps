@@ -6,6 +6,10 @@ This is an attempt at an OpenTelemetry-compatible GPS device that collects posit
 
 :information_source: From a developer-perspective, this is a hobby / experiment to learn more about OpenTelemetry and its inner-workings and is not representative of production implementation, official guidance, etc.
 
+![Adafruit/iLabs on left, Waveshare on right](images/both_devices.jpg)
+![Example route from Pontyprydd to Alresford](images/example_route.jpg)
+
+
 ## How it works
 
 In basic technical terms, the device performs as follows:
@@ -45,41 +49,49 @@ In basic technical terms, the device performs as follows:
   - Remove simple LED support - impossible to convey state
   - Implement SPI-driven RGB LED support to indicate status levels
   - Added [ESP32 Bluetooth WiFi Provisioning](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/provisioning/wifi_provisioning.html) on startup to set SSID/passphrase
+- 2023-09-17 - Optimisation & Clean-up
+  - RGB LED support for both Waveshare (RGB) and iLabs (GRB) devices
+  - Limit protobuf size to <8kB (40 secs of readings)
+  - Avoid initialising protobuf preparatory data structure unless FIFO full
+  - Memory usage reporting
 
 ## Known issues / Pending Improvements
 - One contiguous source file - will broken up in the future
-- Memory limits / consequences untested
 - MPU9250 accelerometer uncorrected
 - Metric dimensions statically set to 3
-- ESP32 GPS core/task memory untuned
+- ESP32 GPS core/task memory untuned (65kB for now)
 - GPS Serial testing / verification
 - Protobuf payload verification
-- ESP32-S3 Wifi optimisation (e.g. hidden AP)
+- ESP32-S3 Wifi optimisation (e.g. hidden AP) if possible
+- ESP32-S3 Bluetooth setup of service.name
 
 ## Hardware 
 The following hardware can be utilised, however through development and testing, an ESP32-S3 is recommended as it has superior caching potential for unstable connections, more storage for functionality and lots of wireless features.
 
 ### Raspberry Pi Pico form factor
  - *Recommended:* [Waveshare ESP32-S3 Pico](https://www.waveshare.com/wiki/ESP32-S3-Pico)
-   - Memory: 512kB SRAM + 2MB PSRAM
+   - Memory: 512kB SRAM (188kB free) + 2MB PSRAM *~10 hours of caching*
    - Storage: 16MB
-   - Bluetooth WiFi Provisioning
+   - Feature: Bluetooth WiFi Provisioning (uses a lot SRAM)
  - *Alternative:* [Raspberry Pi Pico W](https://www.raspberrypi.com/documentation/microcontrollers/raspberry-pi-pico.html)
-   - Memory: 264kB SRAM :warning: *Memory caching risky: needs a stable WiFi connection*
+   - Memory: 264kB SRAM :warning: *40kB free = ~10 mins of caching*
    - Storage: 2MB
  - With a [Waveshare Pico GPS L76B](https://www.waveshare.com/wiki/Pico-GPS-L76B)
    - :information_source: Uses an external antenna
  - With a [Waveshare Pico 10DoF IMU](https://www.waveshare.com/wiki/Pico-10DOF-IMU)
    - Accelerometer, gyroscope, magnetometer, pressure and temperature sensors
+![Waveshare stack with optional micro UPS](images/waveshare.jpg)
+
 
 ### Adafruit Feather form factor
  - *Extremely compact:* [iLabs Challenger RP2040 WiFi/BLE with 16-bit Accelerometer](https://ilabs.se/product/challenger-rp2040-wifi-ble-mkii-with-chip-antenna-and-16bit-accelerometer/)
-   - Memory: 408kB SRAM :warning: *Memory caching limited: needs a moderately reliable connection*
+   - Memory: 408kB SRAM :warning: *240kB free = ~60 mins of caching*
    - Storage: 4MB
    - :information_source: Using upgraded ESP32-C3 firmware (v2+) for SSL support on the ESP8266
  - With a [Adafruit Ultimate GPS Featherwing](https://learn.adafruit.com/adafruit-ultimate-gps-featherwing/overview)
    - Good for testing, as it has a surface-mounted ceramic antenna
-   - :information_source: Mount **above** the iLabs Challenger using short headers for small form-factor
+   - :information_source: Mount **above** the iLabs Challenger using short headers for small form-factor and to use surface-mount receiver
+![Waveshare stack with optional micro UPS](images/ilabs_and_adafruit_gps.jpg)
 
 ## Software
 During execution, the following software libraries are possibly used:
@@ -150,7 +162,7 @@ Providing the above is understood and executable by the user, the code can be bu
 - Compile the supporting protobuf headers using Nanopb and OpenTelemetry proto files
   - Not supplied in repo as they should be built from latest / for your compiler
 - Clone WiFiEspAt and modify accordingly:
-  - (Enable v2 for SSL)[https://github.com/JAndrassy/WiFiEspAT#getting-started]
+  - [Enable v2 for SSL](https://github.com/JAndrassy/WiFiEspAT#getting-started)
   - (Optional) Patch it for fast-scanning [WiFiEspAT.patch](/WiFiEspAT.patch)
 
 From there, the codebase can be compiled in a favorite Arduino compatible IDE or at the command-line.
@@ -160,6 +172,7 @@ From there, the codebase can be compiled in a favorite Arduino compatible IDE or
 There are VERBOSE and DEBUG options that can be switched on:
 - VERBOSE will write human-readable messages
 - DEBUG will noisily print characters to represent data flow inside
+- MEMORY will print memory usage at certain points
 
 Otherwise an RGB LED works as follows (change the GPIO accordingly):
 - Wireless:

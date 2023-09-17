@@ -4,7 +4,15 @@
  * For full ESP32 support:
  * - Flash Size: 16MB
  * - Partition Scheme: 8M with spiffs
- * - PSRAM: QSPI PSRAM
+ * - PSRAM: QSPI PSRAM 
+
+ * Memory when operational:
+ * ESP32-S3 free when running: 
+ *   Core 0: ~188 Kbytes SRAM - Bluetooth is biggest consumer
+ *   Core 1: ~2000 Kbytes PSRAM - ~10 hours of collection
+ * RP2040:
+ *   iLabs Challenger: ~240 kbytes - ~60 minutes of collection
+ *   Raspberry Pi Pico: TBC
  */
 
 /*
@@ -13,6 +21,9 @@
 // Serial console output
 // #define DEBUG 1 // This is noisy, as it will throw characters to show memory, protobuf values, etc
 // #define VERBOSE 1 // Less noisy, but not much introspective capability compared to DEBUG
+
+// Report memory usage
+#define MEMORY 1
 
 // Use an RGB LED for output
 #define RGB_LED 1
@@ -25,7 +36,10 @@ QueueHandle_t xLongQueue;
 #endif 
 
 #ifdef RGB_LED
-SPIClass *spi = NULL;
+#ifdef ARDUINO_ARCH_ESP32
+SPIClass SPI1(FSPI);
+#endif
+
 static const int spiClock = 2400000; // ~0.417us
 #endif
 
@@ -61,10 +75,10 @@ struct MetricMeta {
 } metricMeta[] = {
   // First number indicates the array to put the data - e.g Acceleration all can go into the same store
   // pos, shortname   description     unit   attributes
-  { "position", "GPS Position", "degrees", "service.name", "jm-moto", 
+  { "position", "GPS Position", "degrees", "service.name", "ot-moto", 
     { {"dim", "lat"}, {"dim", "lon"}, { 0, 0 } } 
   },
-  { "accel", "Acceleration", "g", "service.name", "jm-moto", 
+  { "accel", "Acceleration", "g", "service.name", "ot-moto", 
     { {"dim", "x"}, {"dim", "y"}, {"dim", "z"} } 
   }
 };
@@ -96,6 +110,8 @@ typedef struct Rawnode {
 Rawptr rawHead = NULL;
 // Where we push() data to
 Rawptr rawTail = NULL;
+// How much data do we have
+int rawCount = 0;
 
 /*
  * Core 0: Metric Store for Protobuf conversion
@@ -168,20 +184,20 @@ uint32_t makeSPIColorBin(uint8_t inval) {
   return outval;
 }
 
-void sendSPIColor(SPIClass *spi, uint32_t data) {
+void sendSPIColor(uint32_t data) {
   // Send 24 bits - one color, MSB->LSB
-  spi->transfer((data >> 16) & 0xFF);
-  spi->transfer((data >> 8) & 0xFF);
-  spi->transfer(data & 0xFF);
+  SPI1.transfer((data >> 16) & 0xFF);
+  SPI1.transfer((data >> 8) & 0xFF);
+  SPI1.transfer(data & 0xFF);
 }
 
 void setRGBLED(uint8_t red, uint8_t green, uint8_t blue) {
   // Open the SPI and send 24 bits / 72 bits raw data
-  spi->beginTransaction(SPISettings(spiClock, MSBFIRST, SPI_MODE0));
-  sendSPIColor(spi, makeSPIColorBin(red)); // 0x10
-  sendSPIColor(spi, makeSPIColorBin(green)); // 0x10
-  sendSPIColor(spi, makeSPIColorBin(blue)); // 0x10
-  spi->endTransaction();
+  SPI1.beginTransaction(SPISettings(spiClock, MSBFIRST, SPI_MODE0));
+  sendSPIColor(makeSPIColorBin(red)); // 0x10
+  sendSPIColor(makeSPIColorBin(green)); // 0x10
+  sendSPIColor(makeSPIColorBin(blue)); // 0x10
+  SPI1.endTransaction();
 }
 #endif
 
@@ -479,6 +495,7 @@ bool rawPushTail(Rawptr temp) {
     rawTail->next = temp;
     rawTail = temp;
   }
+  rawCount++;
 
   return true;
 }
@@ -494,6 +511,7 @@ bool rawPopHead(void) {
       rawTail = NULL;
     }
     free(temp);
+    rawCount--;
   }
   return true;
 }
@@ -561,7 +579,7 @@ bool datapointPushTail(Dataarray array, int x, int y, double epoch, double value
 }
 
 // Push multiple datapoints into the dataset
-bool datasetPush(Dataarray ptr, uint32_t buf[FIFO_SIZE]) {
+bool datasetPush(Dataarray ptr, uint32_t buf[PLATFORM_FIFO_SIZE]) {
   double epoch;
   float value;
   int z = 2; // start 2 x 32 bits in because of epoch data
@@ -622,7 +640,7 @@ bool datasetFree(Dataarray array) {
 
 // Pushes data onto the FIFO from core1
 bool fifoDispatch(Rawptr ptr) {
-  uint32_t fifobuf[FIFO_SIZE];
+  uint32_t fifobuf[PLATFORM_FIFO_SIZE];
 
   // IDEA: It's possible to do bit-packing here to improve memory
   memcpy(fifobuf, ptr, sizeof(fifobuf));
@@ -634,7 +652,7 @@ bool fifoDispatch(Rawptr ptr) {
   if (rp2040.fifo.push_nb(fifobuf[0])) {
 #endif
     // If the above succeeds, the FIFO is empty or in the process of being emptied by fifoCollect()
-    for (int i = 1; i < FIFO_SIZE; i++)
+    for (int i = 1; i < PLATFORM_FIFO_SIZE; i++)
 #ifdef ARDUINO_ARCH_ESP32
       xQueueSend(xLongQueue, &fifobuf[i], (TickType_t) 1000);
 #else 
@@ -649,39 +667,63 @@ bool fifoDispatch(Rawptr ptr) {
 }
 
 // Pick up data off the FIFO from core0
-int fifoCollect(Dataarray array) {
-  int datapoints = 0;
-  uint32_t fifobuf[FIFO_SIZE] = { 0 };
+int fifoCollect(void) {
+#if defined(ARDUINO_ARCH_ESP32) 
+  if (uxQueueMessagesWaiting(xLongQueue) >= PLATFORM_FIFO_SIZE) {
+#else
+  if (rp2040.fifo.available() >= PLATFORM_FIFO_SIZE) {
+#endif
+    // House pre-protobuf metric type, initialised
+    Datanode myData[METRIC_TYPES] = {{ 0 }};
+    // Pointer to the array
+    Dataarray myDataPtr = &myData;
+
+    // Initialise the dataset - using metric metadata
+    datasetInit(myDataPtr);
+
+    int datapoints = 0;
+    uint32_t fifobuf[PLATFORM_FIFO_SIZE] = { 0 };
 
   // Put in a limit here to keep the packet size small and fragment up larger backlogs? MAX_METRICS?
 #if defined(ARDUINO_ARCH_ESP32) 
-  while (uxQueueMessagesWaiting(xLongQueue) >= FIFO_SIZE) {
+    while (uxQueueMessagesWaiting(xLongQueue) >= PLATFORM_FIFO_SIZE) {
 #else
-  while (rp2040.fifo.available() >= FIFO_SIZE) {
+    while (rp2040.fifo.available() >= PLATFORM_FIFO_SIZE) {
 #endif
+
     // Collect an entire payload off the FIFO
-    for (int i = 0; i < FIFO_SIZE; i++)
+      for (int i = 0; i < PLATFORM_FIFO_SIZE; i++)
 #if defined(ARDUINO_ARCH_ESP32) 
-      xQueueReceive(xLongQueue, &fifobuf[i], (TickType_t) 1000);
+        xQueueReceive(xLongQueue, &fifobuf[i], (TickType_t) 1000);
 #else
-      fifobuf[i] = rp2040.fifo.pop();
+        fifobuf[i] = rp2040.fifo.pop();
 #endif
 
-    // Add bytes to overall Core 0 dataset
-    datasetPush(array, fifobuf);
-    datapoints++;
+      // Add bytes to overall Core 0 dataset
+      datasetPush(myDataPtr, fifobuf);
+      datapoints++;
+      if (datapoints >= MAX_FIFO_OFFLOADED) 
+        break;
+
 #ifdef DEBUG
-    Serial.print(F("m")); 
+      Serial.print(F("m")); 
 #endif
-  }
+    }
 
+    if (datapoints) {
+      buildProtobuf(myDataPtr);
 #ifdef VERBOSE
-  if (datapoints) {
-    Serial.print(F("[VERBOSE] FIFORecv: Datapoints sent = "));
-    Serial.println(datapoints);
-  }
+      Serial.print(F("[VERBOSE] FIFORecv: Datapoints sent = "));
+      Serial.println(datapoints);
 #endif
-  return datapoints;
+    }
+    
+    // Clear the dataset
+    datasetFree(myDataPtr);
+    return datapoints;
+  } else {
+    return 0;
+  }
 }
 
 // Protobuf encoding of a string
@@ -1249,7 +1291,10 @@ void taskLoop1(void *) {
 #if defined(ARDUINO_ARCH_ESP32) && defined(BOARD_HAS_PSRAM)
    // Use external PSRAM
   psramInit();
+  Serial.print(F("[MemUsage] PSRAM Free Bytes: "));
+  Serial.println(HELPER.getFreePsram());
 #endif
+
   while (true)
     loop1();
 }
@@ -1275,6 +1320,11 @@ void loop1() {
     Rawptr temp = (Rawptr) malloc(sizeof(Rawnode));
 #endif
 
+    // If we are starting to overflow, remove the oldest datapoint
+    if (rawCount == MAX_RAW_DATAPOINTS) 
+      rawPopHead();
+
+    // Collect some data
     if (rawdataCollect(temp)) {
       rawPushTail(temp);
 #ifdef DEBUG
@@ -1283,6 +1333,10 @@ void loop1() {
     } else {
       free(temp);
     }
+#if defined(ARDUINO_ARCH_ESP32) && defined(BOARD_HAS_PSRAM) && defined(MEMORY)
+  Serial.print(F("[MemUsage] PSRAM Free Bytes: "));
+  Serial.println(HELPER.getFreePsram());
+#endif
   } 
 
   /*
@@ -1300,10 +1354,16 @@ void setup() {
   Serial.begin(115200);
 
 #ifdef RGB_LED
+#ifdef ARDUINO_ARCH_ESP32
   // Set up the ESP32 SPI
-  spi = new SPIClass(FSPI);
-  spi->begin(SPI_SCK, SPI_MISO, SPI_MOSI, SPI_SS);
+  SPI1.begin(SPI_SCK, SPI_MISO, SPI_MOSI, SPI_SS);
   pinMode(SPI_SS, OUTPUT);
+#endif
+#if defined(ARDUINO_CHALLENGER_2040_WIFI_BLE_RP2040)
+  // This works, but breaks networking, SPI0 panics
+  SPI1.setTX(NEOPIXEL); //pin 11
+  SPI1.begin();
+#endif
   setRGBLED(RGB_WHITE);
 #endif
 
@@ -1321,7 +1381,7 @@ void setup() {
   joinWireless();
 
 #ifdef ARDUINO_ARCH_ESP32
-  xLongQueue = xQueueCreate(FIFO_SIZE, sizeof(uint32_t));
+  xLongQueue = xQueueCreate(PLATFORM_FIFO_SIZE, sizeof(uint32_t));
   // Run the second core setup1() once
   setup1();
   // Run the second core loop1() as a P0 task on core 0 (the *SECOND* ESP32 core) - need to assign PSRAM memory
@@ -1335,6 +1395,11 @@ void setup() {
   // Blue = nothing happening
   setRGBLED(RGB_BLUE);
 #endif
+
+#ifdef MEMORY
+  Serial.print(F("[MemUsage] Core 0 Free Bytes: "));
+  Serial.println(HELPER.getFreeHeap());
+#endif
 }
 
 void loop() {
@@ -1344,29 +1409,20 @@ void loop() {
 
   // Phase 1: If we don't already have data to send, go and collect
   if (pbufLength == 0) {
-    // House pre-protobuf metric type, initialised
-    Datanode myData[METRIC_TYPES] = {{ 0 }};
-    // Pointer to the array
-    Dataarray myDataPtr = &myData;
-
-    // Initialise the dataset - using metric metadata
-    datasetInit(myDataPtr);
-
     // Pick up data from Core 1
-    if (fifoCollect(myDataPtr)) 
-      buildProtobuf(myDataPtr);
-
-    // Clear the dataset
-    datasetFree(myDataPtr);
+    fifoCollect();
   }
    
   // Phase 2: If we have data now, send it
   if (pbufLength > 0) {
-    if(sendOTLP(pbufPayload, pbufLength) == 0) {
-#ifdef VERBOSE
-      Serial.print(F("[VERBOSE] Delivery: Payload size = "));
-      Serial.println(pbufLength);
+#ifdef MEMORY
+    Serial.print(F("[MemUsage] Core 0 Free Bytes: "));
+    Serial.println(HELPER.getFreeHeap());
+    Serial.print(F("[MemUsage] Protobuf Payload: "));
+    Serial.println(pbufLength);
 #endif
+
+    if(sendOTLP(pbufPayload, pbufLength) == 0) {
       pbufLength = 0;
 #ifdef RGB_LED
       setRGBLED(RGB_GREEN);

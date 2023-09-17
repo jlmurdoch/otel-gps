@@ -3,13 +3,10 @@
  */
 #include <SPI.h>
 
-// Safe Pico SPI settings, but use GPIO21 for the LED
-#define SPI_SCK 1
-#define SPI_MISO 42
-#define SPI_MOSI 21 // swap out GPIO2 for GPIO21
-#define SPI_SS 41
+#ifdef ARDUINO_ARCH_ESP32
+SPIClass SPI1(FSPI);
+#endif
 
-SPIClass *spi = NULL;
 static const int spiClock = 2400000;
 
 uint32_t makeSPIColorBin(uint8_t inval) {
@@ -27,30 +24,36 @@ uint32_t makeSPIColorBin(uint8_t inval) {
   return outval;
 }
 
-void sendSPIColor(SPIClass *spi, uint32_t data) {
+void sendSPIColor(uint32_t data) {
   // Send 24 bits - one color, MSB->LSB
-  spi->transfer((data >> 16) & 0xFF);
-  spi->transfer((data >> 8) & 0xFF);
-  spi->transfer(data & 0xFF);
+  SPI1.transfer((data >> 16) & 0xFF);
+  SPI1.transfer((data >> 8) & 0xFF);
+  SPI1.transfer(data & 0xFF);
 }
 
 void setRGBLED(uint8_t red, uint8_t green, uint8_t blue) {
   // Open the SPI and send 24 bits / 72 bits raw data
-  spi->beginTransaction(SPISettings(spiClock, MSBFIRST, SPI_MODE0));
-  sendSPIColor(spi, makeSPIColorBin(red)); 
-  sendSPIColor(spi, makeSPIColorBin(green));
-  sendSPIColor(spi, makeSPIColorBin(blue));
-  spi->endTransaction();
+  SPI1.beginTransaction(SPISettings(spiClock, MSBFIRST, SPI_MODE0));
+  sendSPIColor(makeSPIColorBin(red)); 
+  sendSPIColor(makeSPIColorBin(green));
+  sendSPIColor(makeSPIColorBin(blue));
+  SPI1.endTransaction();
 }
 
 void setup() {
+  // Set up the SPI
+#if defined(ARDUINO_CHALLENGER_2040_WIFI_BLE_RP2040)
+  SPI1.setTX(NEOPIXEL); //pin 11
+  SPI1.begin();
+#endif
+#ifdef ARDUINO_ARCH_ESP32
+  SPI1.begin(1, 42, 21, 41); // pin 21
+#endif
+
   // Set up serial
   Serial.begin(115200);
 
-  // Set up the SPI
-  spi = new SPIClass(FSPI);
-  spi->begin(SPI_SCK, SPI_MISO, SPI_MOSI, SPI_SS);
-  pinMode(SPI_SS, OUTPUT);
+  //pinMode(SPI_SS, OUTPUT);
 }
 
 void loop() {
